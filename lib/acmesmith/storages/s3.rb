@@ -50,6 +50,7 @@ module Acmesmith
           bucket: bucket,
           key: account_key_key,
           body: key.export(passphrase),
+          server_side_encryption: "AES256",
           content_type: 'application/x-pem-file',
         }
         if use_kms
@@ -69,6 +70,7 @@ module Acmesmith
             bucket: bucket,
             key: key,
             body: body,
+            server_side_encryption: "AES256",
             content_type: 'application/x-pem-file',
           }
           if kms
@@ -89,6 +91,7 @@ module Acmesmith
             bucket: bucket,
             key: certificate_current_key(cert.common_name),
             content_type: 'text/plain',
+            server_side_encryption: "AES256",
             body: cert.version,
           )
         end
