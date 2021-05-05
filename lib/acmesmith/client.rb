@@ -1,5 +1,7 @@
 require 'acmesmith/account_key'
 require 'acmesmith/certificate'
+require 'acmesmith/authorization_service'
+require 'acmesmith/ordering_service'
 require 'acmesmith/save_certificate_service'
 require 'acme-client'
 
@@ -11,8 +13,8 @@ module Acmesmith
 
     def new_account(contact, tos_agreed: true)
       key = AccountKey.generate
-      acme = Acme::Client.new(private_key: key.private_key, directory: config.fetch('directory'))
-      client = acme.new_account(contact: contact, terms_of_service_agreed: tos_agreed)
+      acme = Acme::Client.new(private_key: key.private_key, directory: config.directory, connection_options: config.connection_options, bad_nonce_retry: config.bad_nonce_retry)
+      acme.new_account(contact: contact, terms_of_service_agreed: tos_agreed)
 
       storage.put_account_key(key, account_key_passphrase)
 
@@ -20,31 +22,16 @@ module Acmesmith
     end
 
     def order(*identifiers, not_before: nil, not_after: nil)
-      puts "=> Ordering a certificate for the following identifiers:"
-      puts
-      identifiers.each do |id|
-        puts " * #{id}"
-      end
-      puts
-      puts "=> Generating CSR"
-      csr = Acme::Client::CertificateRequest.new(subject: { common_name: identifiers.first }, names: identifiers[1..-1])
-      puts "=> Placing an order"
-      order = acme.new_order(identifiers: identifiers, not_before: not_before, not_after: not_after)
+      order = OrderingService.new(
+        acme: acme,
+        identifiers: identifiers,
+        challenge_responder_rules: config.challenge_responders,
+        not_before: not_before,
+        not_after: not_after
+      )
+      order.perform!
+      cert = order.certificate
 
-      unless order.authorizations.empty? || order.status == 'ready'
-        puts "=> Looking for required domain authorizations"
-        puts
-        order.authorizations.map(&:domain).each do |domain|
-          puts " * #{domain}"
-        end
-        puts
-
-        process_authorizations(order.authorizations)
-      end
-
-      cert = process_order_finalization(order, csr)
-
-      puts "=> Certificate issued"
       puts
       print " * securing into the storage ..."
       storage.put_certificate(cert, certificate_key_passphrase)
@@ -139,7 +126,7 @@ module Acmesmith
       cert = storage.get_certificate(common_name, version: version)
       cert.key_passphrase = certificate_key_passphrase if certificate_key_passphrase
       
-      p12 = OpenSSL::PKCS12.create(passphrase, cert.common_name, cert.private_key, cert.certificate)
+      p12 = cert.pkcs12(passphrase)
       File.open(output, 'w', mode.to_i(8)) do |f|
         f.puts p12.to_der
       end
@@ -175,111 +162,6 @@ module Acmesmith
 
     private
 
-    def process_order_finalization(order, csr)
-      puts "=> Finalizing the order"
-      puts
-
-      print " * Requesting..."
-      order.finalize(csr: csr)
-      puts" [ ok ]"
-
-      while %w(ready processing).include?(order.status)
-        order.reload()
-        puts " * Waiting for procession: status=#{order.status}"
-        sleep 2
-      end
-      puts
-
-      Certificate.by_issuance(order.certificate, csr)
-    end
-
-    def process_authorizations(authzs)
-      return if authzs.empty?
-
-      targets = authzs.map do |authz|
-        challenges = authz.challenges
-        challenge = nil
-        responder = config.challenge_responders.find do |x|
-          challenge = challenges.find { |c|
-            # OMG, acme-client might return a Hash instead of Acme::Client::Resources::Challenge::* object...
-            challenge_type = c.is_a?(Hash) ? c[:challenge_type] : c.challenge_type
-            x.support?(challenge_type)
-          }
-        end
-        {domain: authz.domain, authz: authz, responder: responder, responder_id: responder.__id__, challenge: challenge}
-      end
-      target_by_responders = targets.group_by{ |_| _.fetch(:responder_id) }.map { |_, ts| [ts[0].fetch(:responder), ts] }
-
-      begin
-        target_by_responders.each do |responder, ts|
-          puts "=> Responsing to the challenges for the following identifier:"
-          puts
-          puts " * Responder:   #{responder.class}"
-          puts " * Identifiers:"
-          ts.each do |target|
-            puts "     - #{target.fetch(:domain)} (#{target.fetch(:challenge).challenge_type})"
-          end
-          puts
-
-          responder.respond_all(*ts.map{ |t| [t.fetch(:domain), t.fetch(:challenge)] })
-        end
-
-        puts "=> Requesting validations..."
-        puts
-        targets.each do |target|
-          print " * #{target[:domain]} (#{target[:challenge].challenge_type}) ..."
-          target[:challenge].request_validation()
-          puts " [ ok ]"
-        end
-        puts
-
-        puts "=> Waiting for the validation..."
-        puts
-
-        loop do
-          all_valid = true
-          any_error = false
-          targets.each do |target|
-            next if target[:valid]
-
-            target[:challenge].reload
-            status = target[:challenge].status
-
-            puts " * [#{target[:domain]}] status: #{status}"
-
-            if status == 'valid'
-              target[:valid] = true
-              next
-            end
-
-            all_valid = false
-            if status == 'invalid'
-              any_error = true
-              err = target[:challenge].error
-              puts " ! [#{target[:domain]}] error: #{err.inspect}"
-            end
-          end
-          break if all_valid || any_error
-          sleep 3
-        end
-        puts
-
-        target_by_responders.each do |responder, ts|
-          puts "=> Cleaning the responses the challenges for the following identifier:"
-          puts
-          puts " * Responder:   #{responder.class}"
-          puts " * Identifiers:"
-          ts.each do |target|
-            puts "     - #{target.fetch(:domain)} (#{target.fetch(:challenge).challenge_type})"
-          end
-          puts
-
-          responder.cleanup_all(*ts.map{ |t| [t.fetch(:domain), t.fetch(:challenge)] })
-        end
-
-        puts "=> Authorized!"
-      end
-    end
 
     def config
       @config
@@ -296,7 +178,7 @@ module Acmesmith
     end
 
     def acme
-      @acme ||= Acme::Client.new(private_key: account_key.private_key, directory: config.fetch('directory'))
+      @acme ||= Acme::Client.new(private_key: account_key.private_key, directory: config.directory, connection_options: config.connection_options, bad_nonce_retry: config.bad_nonce_retry)
     end
 
     def certificate_key_passphrase

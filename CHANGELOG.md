@@ -1,3 +1,62 @@
+## v2.4.0 (2020-12-03)
+
+### Enhancement
+
+- route53: Gains `restore_to_original_records` option. When enabled, existing record will be restored after authorizing domain names. Useful when other ACME tools or providers using ACME where requires a certain record to remain as long as possible for their renewal process (e.g. Fastly TLS).
+
+## v2.3.1 (2020-05-12)
+
+### Fixes
+
+- Fixing Docker image build has failed for the release tag. https://github.com/sorah/acmesmith/runs/665853406
+
+## v2.3.0 (2020-05-12)
+
+### Enhancement
+
+- route53: Added support of assuming IAM Role to access Route 53. (requested at [#36](https://github.com/sorah/acmesmith/issues/36) [#37](https://github.com/sorah/acmesmith/pull/37) [#38](https://github.com/sorah/acmesmith/issues/36))
+
+- Added filter for challenge responders. This allows selecting a challenge responder for specific domain names. (indirectly requested at [#36](https://github.com/sorah/acmesmith/issues/36) [#37](https://github.com/sorah/acmesmith/pull/37) [#38](https://github.com/sorah/acmesmith/issues/36))
+
+  ```yaml
+  challenge_responders:
+    # Use specific IAM role for the domain "example.dev" ...
+    - route53:
+        assume_role:
+          role_arn: 'arn:aws:iam:...'
+      filter:
+        subject_name_exact:
+          - example.dev
+
+    - manual_dns: {}
+      filter:
+        subject_name_suffix:
+          - example.net
+
+    # Default
+    - route53: {}
+  ```
+
+- config: now accepts `connection_options` and `bad_nonce_retry` for [`Acme::Client`](https://github.com/unixcharles/acme-client).
+
+### Fixes
+
+- Exported PKCS#12 were not included a certificate chain [#35](https://github.com/sorah/acmesmith/pulls/35)
+- s3: `use_kms` option was not respected for certificate keys & PKCS#12. It was always `true`.
+- A large refactoring of internal components.
+
+## v2.2.0 (2018-08-08)
+
+### Enhancement
+
+- s3: Added `pkcs12_passphrase` and `pkcs12_commonname` options for saving PKCS#12 file into a S3 bucket. This is for scripts which read S3 bucket directly and needs PKCS#12 file.
+
+## v2.1.0 (2018-06-07)
+
+### Changes
+
+- route53: Private hosted zones are now ignored by default. If you really need to use such zones, specify explicitly with `hosted_zone_map`.
+
 ## v2.0.3 (2018-05-19)
 
 ### Bug fixes
